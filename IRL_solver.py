@@ -97,6 +97,7 @@ class IRL_Crocoddyl():
         self.best_w = None
         self.last_traj = None
         self.last_w = None
+        self.mu_phi = None
         self.steps = 0.5**(2*(np.array(list(range(self.line_search_steps)))))
         self.init_params()
  
@@ -110,18 +111,14 @@ class IRL_Crocoddyl():
         self.solver.termination_tolerance = 1e-4
         self.solver.with_callbacks = False
 
-        self.runningModels = self.solver.problem.runningModels
-        self.terminalModel = self.solver.problem.terminalModel
-        self.runningDatas = self.solver.problem.runningDatas
-        self.terminalData = self.solver.problem.terminalData
 
-        self.nr_run = len(self.runningModels[0].differential.costs.costs.todict().keys())
-        self.nr_term = len(self.terminalModel.differential.costs.costs.todict().keys())
+        self.nr_run = len(self.solver.problem.runningModels[0].differential.costs.costs.todict().keys())
+        self.nr_term = len(self.solver.problem.terminalModel.differential.costs.costs.todict().keys())
 
         self.nr = self.nr_run + self.nr_term
 
-        self.keys_run = list(self.runningModels[0].differential.costs.costs.todict().keys())
-        self.keys_term = list(self.terminalModel.differential.costs.costs.todict().keys())
+        self.keys_run = list(self.solver.problem.runningModels[0].differential.costs.costs.todict().keys())
+        self.keys_term = list(self.solver.problem.terminalModel.differential.costs.costs.todict().keys())
         if 'w_run' in self.args.keys() and 'w_term' in self.args.keys():
             self.w_run = self.args['w_run']
             self.w_term = self.args['w_term']
@@ -135,9 +132,10 @@ class IRL_Crocoddyl():
 
         self.update_solver_w(self.w_run, self.w_term)
 
-        self.phi_opt, self.phis_opt = self.get_traj_features(self.xs_opt, self.us_opt)
-        self.phis.append(self.phi_opt); self.phis_set.append(self.phis_opt)
+        phi_opt, phis_opt = self.get_traj_features(self.xs_opt, self.us_opt)
+        self.phis.append(phi_opt); self.phis_set.append(phis_opt)
         self.Xs.append(self.xs_opt); self.Us.append(self.us_opt)
+        self.phi_opt = phi_opt; self.phis_opt = phis_opt
 
         if 'use_bad' in self.args:
             self.use_bad = self.args['use_bad']
@@ -156,7 +154,7 @@ class IRL_Crocoddyl():
         self.Xs.append(self.xs_nopt); self.Us.append(self.us_nopt)
         self.opt_div = [1.0]
 
-        self.d_phi = np.linalg.norm(self.phi_opt - phi_nopt)
+        self.d_phi = np.linalg.norm(phi_opt - phi_nopt)
 
         # IRL related params
         if 'Lambda' in self.args.keys():
@@ -199,7 +197,7 @@ class IRL_Crocoddyl():
         cost = 0.0
         cost_set = []
         
-        # Terminal Features
+        # Terminal Featuressolver_args['test'] = curr_value
         phi = phis[-1]
         cost += np.sum(phi[self.nr_run:]*w_term)
         cost_set.append(cost)
@@ -214,10 +212,8 @@ class IRL_Crocoddyl():
     def update_solver_w(self,w_run,w_term):
         for i in range(self.T):
             for key_ in self.keys_run: 
-                self.runningModels[i].differential.costs.costs[key_].weight = w_run[key_]
                 self.solver.problem.runningModels[i].differential.costs.costs[key_].weight = w_run[key_]
         for key_ in self.keys_term: 
-            self.terminalModel.differential.costs.costs[key_].weight = w_term[key_]
             self.solver.problem.terminalModel.differential.costs.costs[key_].weight = w_term[key_]
         
         return True
@@ -225,15 +221,8 @@ class IRL_Crocoddyl():
     
     def solve_autoreg(self, solver_args):
 
-        def merge_sets(X1, X2):
-            X = []
-            for x in X1:
-                X.append(x)
-            for x in X2:
-                X.append(x)
-            return X
-
         def loop_termination_check(args):
+            message = ''
             termination = False
             iteration = args['iteration']
             KL = args['KL_div']
@@ -256,20 +245,27 @@ class IRL_Crocoddyl():
                 message = 'Maximum iteration termination criteria met.'
             else:
                 termination = False
-                if iteration < 10:
-                    filler = ' '
-                else: 
-                    filler = ''
+            if iteration < 9:
+                filler = ' '
+            else: 
+                filler = ''
 
-                if 'KL_div_star' in args.keys():
-                    message = '||  {}{}  || {:.6f} || {:.6f} || {:.6f} || {:.6f} || {:.6f} || {:.3f}'.format(filler,args['iteration'], args['KL_div'], args['KL_div_star'], args['Opt_Dev'], args['Cost_Diff'], args['Fcn_Val'], args['Step'])
-                else:
-                    message = '||  {}{}  || {:.6f} || {:.6f} || {:.6f} || {:.6f} || {:.6f} || {:.3f}'.format(filler,args['iteration'], args['KL_div'], None, args['Opt_Dev'], args['Cost_Diff'], args['Fcn_Val'], args['Step'])
+            if 'KL_div_star' in args.keys():
+                info = '||  {}{}  || {:.6f} || {:.6f} || {:.6f} || {:.6f} || {:.6f} || {} || {}'.format(
+                    filler,
+                    args['iteration']+1, 
+                    args['KL_div'], 
+                    args['KL_div_star'], 
+                    args['Opt_Dev'], 
+                    args['Cost_Diff'], 
+                    args['Fcn_Val'], 
+                    args['Step'],
+                    args['Step_Type'])
             
-            if hard_terminate:
+            if hard_terminate and min_iter_termination:
                 termination = True
                 message = 'Hard termination criteria met.'
-            return termination, message
+            return termination, info, message
 
         @staticmethod
         def fcn_w(x, opt_ind, nopt_ind):
@@ -280,12 +276,22 @@ class IRL_Crocoddyl():
             output += self.Lambda*np.linalg.norm(x)
             return output
 
+        def check_vector_values(V):
+            inds = np.zeros_like(V)
+            for i, v in enumerate(V):
+                if v <= 0:
+                    inds[i] = 0
+                else:
+                    inds[i] = 1/v
+            return np.argmax(inds)
+
         def get_inds():
             inds = []
             if len(self.Xs) > self.K_set:
                 if self.use_best:
-                    opt_div_vals = np.array(self.opt_div)
-                    inds = list(np.argsort(opt_div_vals)[:self.K_set])
+                    # vals = np.array(self.opt_div[1:])
+                    vals = np.array(self.cost_diffs)
+                    inds = list((np.argsort(vals)+1)[:self.K_set])
                 else:
                     inds = list(range(len(self.Xs)-self.K_set,len(self.Xs)))
             else:
@@ -300,7 +306,9 @@ class IRL_Crocoddyl():
                 X = [self.Xs[-1][i] for i in range(self.T+1)]
                 U = [self.Us[-1][i] for i in range(self.T)]
             elif self.next_traj == 'worst':
-                X, U = self.get_worst_trajectory()
+                # X, U = self.get_worst_trajectory()
+                X = [self.Xs[1][i] for i in range(self.T+1)]
+                U = [self.Us[1][i] for i in range(self.T)]
             elif self.next_traj == 'optimal':
                 X = [self.xs_opt[i] for i in range(self.T+1)]
                 U = [self.us_opt[i] for i in range(self.T)]
@@ -309,38 +317,60 @@ class IRL_Crocoddyl():
         def log_likelihood(opt_ind, nopt_ind, w_run, w_term):
             ll = 0.0
             phis_opt = self.phis_set[opt_ind]
-            phis_set = [self.phis_set[i] for i in nopt_ind]
+            inds = [opt_ind]; inds.extend(nopt_ind); phis_set = [self.phis_set[i] for i in inds]
             costs_set = []
-            _, costs_opt = self.get_traj_costs(phis_opt, w_run, w_term)
-            for phis in phis_set:
-                _, costs = self.get_traj_costs(phis, w_run, w_term)
-                costs_set.append(costs)
+            if self.normalize:
+                phis_set = self.normalize_features(phis_set)
+                for phis in phis_set:
+                    _, costs = self.get_traj_costs(phis, w_run, w_term)
+                    costs_set.append(costs)
+            else:
+                for phis in phis_set:
+                    _, costs = self.get_traj_costs(phis, w_run, w_term)
+                    costs_set.append(costs)
             
-            samples = np.linspace(0,self.T,self.N_samples).astype(int)
+            samples = np.linspace(0,self.T-1,self.N_samples).astype(int)
 
+            norm_phi = np.zeros(shape=(self.T, self.K_set, self.nr))
+            for i in range(self.T):
+                for j, phi in enumerate(phis_set[1:]):
+                    norm_phi[i,j] = phi[i] - phis_opt[i]
+            norm_phi = np.linalg.norm(norm_phi, axis = 2)
+            max_d_phi = np.max(norm_phi, axis=1)
+            sum_phi = np.sum(norm_phi, axis = 1) + 1
+            mu_phi = np.mean(norm_phi, axis = 1)
             for i in samples:
-                num = 1
-                den = 1
-                c_o = costs_opt[i]
+                c_o = costs_set[0][i]
                 p_o = phis_opt[i]
-                for c_no, p_no in zip(costs_set, phis_set):
-                    # den += np.max([np.nextafter(0,1),np.linalg.norm(p_o - p_no[i])*(np.exp(-(c_no[i] - c_o)))])
-                    # den += np.max([np.nextafter(0,1),np.linalg.norm(c_no[i] - c_o)*(np.exp(-(c_no[i] - c_o)))])
-                    # den += np.max([np.nextafter(0,1),(np.exp(-(c_no[i] - c_o) - 1e-5*np.linalg.norm(p_o - p_no[i])))])
-                    den += np.max([np.nextafter(0,1),(np.exp(-(c_no[i] - c_o)))])
-                ll += np.log(num/den)
-
+                # num = 1.0
+                num = 1.0/sum_phi[i]
+                den = num
+                for j, c_no in enumerate(costs_set[1:]):
+                    val =  (norm_phi[i,j]/sum_phi[i])*(np.exp(-(c_no[i] - c_o))) # Working !!
+                    # val =  norm_phi[i,j]*(np.exp(-(c_no[i] - c_o))) # Working !!
+                    # val =  np.exp(norm_phi[i,j]/sum_phi[i])*(np.exp(-(c_no[i] - c_o))) 
+                    # val =  np.exp(norm_phi[i,j]/max_d_phi[i])*(np.exp(-(c_no[i] - c_o)))
+                    # val =  np.exp(-(c_no[i] - c_o)*1e-1)
+                    # val =  np.exp(-(c_no[i] - c_o))
+                    den += np.max([0.0, np.min([1e+300, val])])
+                # ll += np.log(num/den)
+                # ll += mu_phi[i]*np.log(num/den)
+                # ll += (1 - i/self.T)*np.log(num/den)
+                ll += (1 - i/self.T)*mu_phi[i]*np.log(num/den)
+            self.mu_phi = mu_phi
             return ll
         
         def line_search(w_prev, dw, solver_args, type = 'cost'):
+            solver_args['hard_terminate'] = False
             w_temp = w_prev.copy()
             chosen_step = False
             step_ind = 0
+            cost_diffs = []
+            opt_diffs = []
             if type == 'none':
                 w_loop = w_prev + dw
                 chosen_step = True
                 solver_args['Step'] = 1.0
-
             while not chosen_step:
                 step = self.steps[step_ind]
                 w_curr = w_temp + step*dw
@@ -349,61 +379,67 @@ class IRL_Crocoddyl():
                 self.update_solver_w(w_run_temp, w_term_temp)
                 xs_init, us_init = initiate_trajectory()
                 self.solver.solve(xs_init, us_init, self.sqp_iter)
-                # phi, phi_set = self.get_new_traj_features()
-                phi, phi_set = self.get_traj_features(self.solver.xs.copy(), self.solver.us.copy())
-                phi_o, _ = self.get_traj_features(self.Xs[0], self.Us[0])
-                phi_no, _ = self.get_traj_features(self.Xs[1], self.Us[1])
+                phi, phi_set = self.get_new_traj_features()
                 if type in ['opt', 'both']:
-                    # opt_div = np.linalg.norm(phi - self.phi_opt)/self.d_phi
-                    opt_div = np.linalg.norm(phi - phi_o)/np.linalg.norm(phi_no - phi_o)
-                    print(opt_div, np.linalg.norm(phi_no - phi_o))
-                    condition = opt_div < self.opt_div[-1]# and solver_args['iteration'] > 1
+                    opt_div = (np.linalg.norm(phi - self.phis[0]))/self.d_phi
+                    condition = opt_div < self.opt_div[-1]
                     if type == 'both':
                         condition_opt = condition
                 if type in ['cost', 'both']:
                     w_run_temp_v, w_term_temp_v, _ = self.dict_to_vector(w_run_temp, w_term_temp)
                     c, _ = self.get_traj_costs(phi_set, w_run_temp_v, w_term_temp_v)
-                    c_opt, _ = self.get_traj_costs(self.phis_opt, w_run_temp_v, w_term_temp_v)
-                    condition = (c - c_opt)**2 < self.cost_diffs[-1] #or c < c_opt
-                    # print('Optimal Cost: ', c_opt, 'Current Cost: ', c)
+                    c_opt, _ = self.get_traj_costs(self.phis_set[0], w_run_temp_v, w_term_temp_v)
+                    condition = (c - c_opt)**2 < self.cost_diffs[-1]
                     if type == 'both':
                         condition_cost = condition
 
                 if type != 'both':
                     if condition:
                         chosen_step = True
-                        solver_args['Step'] = step
+                        solver_args['Step'] = step_ind
+                        solver_args['Step_Type'] = type
                         w_loop = w_temp + step*dw
                     else:
                         chosen_step = False
                         step_ind += 1
                         if step_ind == len(self.steps):
-                            solver_args['Step'] = 0.0
+                            solver_args['Step'] = 'Stop'
                             chosen_step = True
                             solver_args['hard_terminate'] = True
                             w_loop = w_prev
                             break
                 else:
-                    if condition_opt:
+                    if condition_cost:
                         chosen_step = True
-                        solver_args['Step'] = step
+                        solver_args['Step'] = step_ind
+                        solver_args['Step_Type'] = 'Cost'
                         w_loop = w_temp + step*dw
                     else:
                         chosen_step = False
                         step_ind += 1
+                        opt_diffs.append(self.opt_div[-1] - opt_div)
                         if step_ind == len(self.steps):
-                            step_ind = 0
-                            type = 'cost'
-                            self.line_search_base = 'cost'
+                            if opt_diffs[np.argmax(np.stack(opt_diffs))] > 0:
+                                ind = check_vector_values(np.array(opt_diffs))
+                                step = self.steps[ind]
+                                chosen_step = True
+                                solver_args['Step'] = ind
+                                solver_args['Step_Type'] = 'Cost based on opt'
+                                w_loop = w_temp + step*dw
+                            else:
+                                solver_args['Step'] = 0
+                                chosen_step = True
+                                solver_args['hard_terminate'] = True
+                                w_loop = w_prev
+                                break
             
             return w_loop, solver_args
                 
         def solve(solver_args):
             terminate = False
-            # opt_descent = True
-            # cost_decent = True
             _, _, w_loop = self.dict_to_vector(self.w_run, self.w_term)
             lb = 0; ub = np.inf
+            # lb = 0; ub = 1.0
             bnds = Bounds(lb, ub)
             tol = 1e-10
             opt_ind = 0
@@ -427,49 +463,42 @@ class IRL_Crocoddyl():
 
                 w_loop, solver_args = line_search(w_prev, dw, solver_args, type = self.line_search_base)
 
-                w_loop = self.normalize_vector(w_loop)
-                w_run, w_term = self.vector_to_dict(w_loop[:self.nr_run], w_loop[self.nr_run:])
-                self.w_run = w_run.copy(); self.w_term = w_term.copy()
-                self.update_solver_w(w_run, w_term)
-                new_x = np.stack(self.solver.xs.copy())
-                new_u = np.stack(self.solver.us.copy())
-                self.Xs.append(new_x.copy())
-                self.Us.append(new_u.copy())
-                # phi, phi_set = self.get_new_traj_features()
-                phi, phi_set = self.get_traj_features(new_x, new_u)
-                phi_o, _ = self.get_traj_features(self.Xs[0], self.Us[0])
-                phi_no, _ = self.get_traj_features(self.Xs[1], self.Us[1])
-                self.phis.append(phi); self.phis_set.append(phi_set)
-                w_run_v, w_term_v, _ = self.dict_to_vector(w_run, w_term)
-                c, _ = self.get_traj_costs(phi_set, w_run_v, w_term_v)
-                c_opt, _ = self.get_traj_costs(self.phis_opt, w_run_v, w_term_v)
-                # c_nopt, _ = self.get_traj_costs(self.phis_set[1], w_run_v, w_term_v)
-                solver_args['Cost_Diff'] = (c - c_opt)**2; self.cost_diffs.append(solver_args['Cost_Diff'])
-                # solver_args['Cost_Diff'] = ((c - c_opt)/(c_nopt - c_opt))**2; self.cost_diffs.append(solver_args['Cost_Diff'])
-                # solver_args['Opt_Dev'] = np.linalg.norm(phi - self.phi_opt)/self.d_phi; self.opt_div.append(solver_args['Opt_Dev'])
-                solver_args['Opt_Dev'] = np.linalg.norm(phi - phi_o)/np.linalg.norm(phi_no - phi_o); self.opt_div.append(solver_args['Opt_Dev'])
-                solver_args['Fcn_Val'] = fcn_w(w_loop, 0, nopt_inds)
-                self.ws.append(self.dict_to_vector(self.w_run, self.w_term))
+                if not solver_args['hard_terminate']:
+                    w_loop = self.normalize_vector(w_loop)
+                    w_run, w_term = self.vector_to_dict(w_loop[:self.nr_run], w_loop[self.nr_run:])
+                    self.w_run = w_run.copy(); self.w_term = w_term.copy()
+                    self.update_solver_w(w_run, w_term)
+                    xs_init, us_init = initiate_trajectory()
+                    self.solver.solve(xs_init, us_init, self.sqp_iter)
+                    new_x = np.stack(self.solver.xs.copy())
+                    new_u = np.stack(self.solver.us.copy())
+                    self.Xs.append(new_x.copy())
+                    self.Us.append(new_u.copy())
+                    phi, phi_set = self.get_new_traj_features()
+                    self.phis.append(phi); self.phis_set.append(phi_set)
+                    w_run_v, w_term_v, _ = self.dict_to_vector(w_run, w_term)
+                    c, _ = self.get_traj_costs(phi_set, w_run_v, w_term_v)
+                    c_nopt, _ = self.get_traj_costs(self.phis_set[1], w_run_v, w_term_v)
+                    c_opt, _ = self.get_traj_costs(self.phis_set[0], w_run_v, w_term_v)
+                    # c_nopt, _ = self.get_traj_costs(self.phis_set[1], w_run_v, w_term_v)
+                    # solver_args['Cost_Diff'] = ((c - c_opt)/(c_opt - c_nopt))**2; self.cost_diffs.append(solver_args['Cost_Diff'])
+                    solver_args['Cost_Diff'] = (c - c_opt)**2; self.cost_diffs.append(solver_args['Cost_Diff'])
+                    solver_args['Opt_Dev'] = (np.linalg.norm(phi - self.phi_opt))/self.d_phi; self.opt_div.append(solver_args['Opt_Dev'])
+                    solver_args['Fcn_Val'] = fcn_w(w_loop, 0, nopt_inds)
+                    self.ws.append(self.dict_to_vector(self.w_run, self.w_term))
                 
-                # if solver_args['iteration'] > 2:
-                #     opt_descent = True if self.opt_div[-1] < self.opt_div[-2] else False
-                #     cost_decent = True if self.cost_diffs[-1] < self.cost_diffs[-2] else False
-                #     if not opt_descent and not cost_decent:
-                #         solver_args['hard_terminate'] = True
+                    nopt_inds = get_inds()
+                    opt_ind = 0                
                     
-
-                nopt_inds = get_inds()
-                opt_ind = 0                
-                
-                solver_args['KL_div'] = self.KL_divergence(log_likelihood, [opt_ind] + nopt_inds, w_prev, w_loop)
-                if self.compare_desired:
-                    solver_args['KL_div_star'] = self.KL_divergence(log_likelihood, [opt_ind] + nopt_inds, self.w_star[-1], w_loop)
-                terminate, message = loop_termination_check(solver_args)
-                if self.verbose:
-                    print(message)
+                    solver_args['KL_div'] = self.KL_divergence(log_likelihood, [opt_ind] + nopt_inds, w_prev, w_loop)
+                    if self.compare_desired:
+                        solver_args['KL_div_star'] = self.KL_divergence(log_likelihood, [opt_ind] + nopt_inds, self.w_star[-1], w_loop)
+                terminate, info, message = loop_termination_check(solver_args)
+                if self.verbose and not terminate:
+                    print(info)
                 solver_args['iteration'] += 1
-            if not self.verbose:
-                print(message)
+            # if not self.verbose:
+            print(message)
 
         
         solve(solver_args)
@@ -499,29 +528,21 @@ class IRL_Crocoddyl():
 
         # Terminal Features
         X = xs[-1]
-        m = self.solver.problem.terminalModel.state.pinocchio
-        d = self.solver.problem.terminalData.differential.pinocchio
-        pin.framesForwardKinematics(m,d,X[:m.nq])
-        pin.updateFramePlacements(m,d)
-        pin.computeJointJacobians(m,d, X[:m.nq])
         for j, k in enumerate(self.keys_term):
-            self.terminalModel.differential.costs.costs[k].cost.calc(self.terminalData.differential.costs.costs[k], X)
-            self.terminalModel.differential.costs.costs[k].cost.calcDiff(self.terminalData.differential.costs.costs[k], X)
-            Phi[j + self.nr_run] += self.terminalData.differential.costs.costs[k].cost
+            self.solver.problem.terminalModel.differential.costs.costs[k].cost.calc(self.solver.problem.terminalData.differential.costs.costs[k], X)
+            self.solver.problem.terminalModel.differential.costs.costs[k].cost.calcDiff(self.solver.problem.terminalData.differential.costs.costs[k], X)
+            Phi[j + self.nr_run] += self.solver.problem.terminalData.differential.costs.costs[k].cost
         Phi_set.append(Phi.copy())
         
         # Running Features
         for i in range(self.T-1,-1,-1):
             X = xs[i]; U = us[i]
-            m = self.solver.problem.runningModels[i].state.pinocchio
-            d = self.solver.problem.runningDatas[i].differential.pinocchio
-            pin.framesForwardKinematics(m,d,X[:m.nq])
-            pin.updateFramePlacements(m,d)
-            pin.computeJointJacobians(m,d, X[:m.nq])
+            self.solver.problem.runningModels[i].differential.actuation.calc(self.solver.problem.runningDatas[i].differential.multibody.actuation, X, U)
+            self.solver.problem.runningModels[i].differential.actuation.calcDiff(self.solver.problem.runningDatas[i].differential.multibody.actuation, X, U)
             for j, k in enumerate(self.keys_run):
-                self.runningModels[i].differential.costs.costs[k].cost.calc(self.runningDatas[i].differential.costs.costs[k], X, U)
-                self.runningModels[i].differential.costs.costs[k].cost.calcDiff(self.runningDatas[i].differential.costs.costs[k], X, U)
-                Phi[j] += self.runningDatas[i].differential.costs.costs[k].cost
+                self.solver.problem.runningModels[i].differential.costs.costs[k].cost.calc(self.solver.problem.runningDatas[i].differential.costs.costs[k], X, U)
+                self.solver.problem.runningModels[i].differential.costs.costs[k].cost.calcDiff(self.solver.problem.runningDatas[i].differential.costs.costs[k], X, U)
+                Phi[j] += self.solver.problem.runningDatas[i].differential.costs.costs[k].cost
             Phi_set.append(Phi.copy())
         
         return Phi, Phi_set
@@ -541,7 +562,8 @@ class IRL_Crocoddyl():
                 'Opt_Dev': None,
                 'Cost Diff': None,
                 'Fcn_Val': 1.0,
-                'Step': 1.0
+                'Step': 1.0,
+                'Step_Type': 'None'
             }
             self.solve_autoreg(solver_args)
             self.report_results()
@@ -598,6 +620,22 @@ class IRL_Crocoddyl():
             return wv
         return wv/M
     
+    def normalize_features(self, phis_set):
+        normalized_phis = phis_set.copy()
+        if len(phis_set) == 1:
+            return phis_set
+        else:
+            for i in range(len(phis_set[0])):
+                phi_ = []
+                for phi in phis_set:
+                    phi_.append(phi[i])
+                phi_ = np.stack(phi_)
+                std_phi = np.std(phi_, axis = 0)
+                std_phi[std_phi == 0] = 1.0
+                for j in range(len(normalized_phis)):
+                    normalized_phis[j][i] /= std_phi
+        return normalized_phis
+    
     def generate_zero_w(self):
         w_run = {}
         w_term = {}
@@ -608,8 +646,10 @@ class IRL_Crocoddyl():
         return w_run, w_term
     
     def get_best_trajectory(self):
-        opt_div = np.array(self.opt_div)
-        best_ind = np.argmin(opt_div)
+        # opt_div = np.array(self.opt_div)
+        # best_ind = np.argmin(opt_div)
+        cost_diffs = np.array(self.cost_diffs)
+        best_ind = np.argmin(cost_diffs)
         X = [self.Xs[best_ind][i] for i in range(self.T+1)]
         U = [self.Us[best_ind][i] for i in range(self.T)]
         return X, U

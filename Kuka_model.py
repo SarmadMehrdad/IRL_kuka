@@ -71,8 +71,9 @@ def init_robot(robot_simulator, q0, v0, obs_set, ee_trans, w_run, w_term, dt, T)
     dataCollectorCollision = crocoddyl.DataCollectorMultibody(pin_data)
     # Control regularization cost
     uResidual = crocoddyl.ResidualModelControlGrav(state)
-    uRegCost = crocoddyl.CostModelResidual(state, uResidual)
+    uRegCost = crocoddyl.CostModelResidual(state,uResidual)
     uCostData = uRegCost.createData(dataCollectorAct)
+    # uCostData 
     # State regularization cost
     xResidual = crocoddyl.ResidualModelState(state, x0)
     xRegCost = crocoddyl.CostModelResidual(state, xResidual)
@@ -121,13 +122,13 @@ def init_robot(robot_simulator, q0, v0, obs_set, ee_trans, w_run, w_term, dt, T)
     # Create Integrated Action Model (IAM), i.e. Euler integration of continuous dynamics and cost
     runningModel = crocoddyl.IntegratedActionModelEuler(running_DAM, dt)
     terminalModel = crocoddyl.IntegratedActionModelEuler(terminal_DAM, 0.)
-    runningModel.differential.armature = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.])
-    terminalModel.differential.armature = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.])
+    # runningModel.differential.armature = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.])
+    # terminalModel.differential.armature = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.])
 
     problem = crocoddyl.ShootingProblem(x0, [runningModel] * T, terminalModel)
     solver = mim_solvers.SolverSQP(problem)
 
-    return solver, runningCostData, terminalCostData
+    return solver
 
 def update_solver_weights(solver, T, w_run, w_term):
     for i in range(T):
